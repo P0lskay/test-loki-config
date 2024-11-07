@@ -1,13 +1,20 @@
+import glob
+import os
+import errno
+from time import sleep
+
 from kubernetes import client, config
 import logging
 import yaml
 import time
 import sys
 import datetime
+import requests
 
 from kubernetes.client import ApiException
 
 from helpers import merge_dicts
+
 
 ### logging construction ###############
 clogger = logging.getLogger(__name__)
@@ -64,8 +71,8 @@ def restart_deployments(v1_apps, deployment, ns):
 
     Args:
         v1_apps (object): k8s api object
-        deployment (string): the name of deployment to restart
-        ns (string): the namespace of deplyments
+        deployment (str): the name of deployment to restart
+        ns (str): the namespace of deplyments
     """
     now = datetime.datetime.utcnow()
     now = str(now.isoformat("T") + "Z")
@@ -85,26 +92,108 @@ def restart_deployments(v1_apps, deployment, ns):
     except ApiException as e:
         print("Exception when calling AppsV1Api->read_namespaced_deployment_status: %s\n" % e)
 
-def send_logs_query_to_loki(query):
+def send_query_to_loki(endpoint, loki_query):
     """Send log request to loki
 
     Args:
-        query (string): logql query for loki
+        endpoint (str)
+        loki_query (str): logql query for loki
     """
+    #loki_query = ('{log_type="container", app_name=~"logmaker", app_instance=~".*", app_component=~".*", '
+    #              'namespace=~"personal-anmakarov", pod=~".*", container=~".*"} |> "<_>' + str(search_int) + '<_>" '
+    #              '| json | line_format "{{.message}}"' + "&start=" + str(int(start_time)) + "&end=" +
+    #                str(int(end_time)) + "&limit=1000")
+    result_query = endpoint + "?query=" + loki_query
+    r = requests.get(result_query, headers={"X-Scope-OrgID": "personal-anmakarov|system-logging-new"}, timeout=120)
 
-def send_count_of_logs_query_to_loki(query):
-    """Send request for log counting to loki
+    return r.status_code
+
+
+def prepare_test_results(start_time, end_time, stats):
+    """Prepare results of test
 
     Args:
-        query (string): logql query for loki
+        end_time (int):
+        start_time (int):
+        stats (dict):
     """
+    filename = "./results.txt"
+    if not os.path.exists(os.path.dirname(filename)):
+        try:
+            os.makedirs(os.path.dirname(filename))
+        except OSError as exc:  # Guard against race condition
+            if exc.errno != errno.EEXIST:
+                raise
 
-def prepare_test_results():
-    """Prepare results of test
-    """
+    dashboard_link = (f'https://dev-monitor.sbis.ru/d/PK9eSrJVz/k8s-sistema-sbora-logov-rasshirennyj?orgId=1&from={start_time}&to={end_time}'
+                      f'&var-datasource=adm-k8s-dpc24&var-tenant=dpc24&var-environment=adm&var-cluster=feature2'
+                      f'-core-dpc&var-Loki_datasource=adm-k8s-dpc24-feature2-core-dpc')
 
+    with open(filename, "a") as myfile:
+        myfile.write(stats["name"] + '\n')
+        myfile.write(dashboard_link + '\n')
 if __name__ == "__main__" :
     clogger.info("Start script")
-    v1_apps = client.AppsV1Api()
-    #restart_deployments(v1_apps, "loki-loki-distributed-querier", "system-logging-new")
-    #wait_for_deployment_complete(v1_apps, "loki-loki-distributed-querier", "system-logging-new")
+    endpoint = "http://10.236.204.2:3100/loki/api/v1/query_range"
+    times = [
+        (1730974531, 1730983246)
+    ]
+    search_strings = [".*", "234781", "32478"]
+    logs_queries = [
+        '{{log_type="container", app_name=~"logmaker", app_instance=~".*", app_component=~".*", '
+        'namespace=~"personal-anmakarov", pod=~".*", container=~".*"}} | "(?i){search_string}" | json | line_format "{{{{.message}}}}"' +
+        "&start={start_time}&end={end_time}&limit=1000",
+
+        '{{log_type="container", app_name=~"logmaker", app_instance=~".*", app_component=~".*", '
+        'namespace=~"personal-anmakarov", pod=~".*", container=~".*"}} | json | message=~"{search_string}" | line_format "{{{{.message}}}}"' +
+        "&start={start_time}&end={end_time}&limit=1000",
+    ]
+    count_queries = [
+        'sum(count_over_time({{log_type="container", app_name=~"logmaker", app_instance=~".*", app_component=~".*", '
+        'namespace=~"personal-anmakarov", pod=~".*", container=~".*"}} | "(?i){search_string}" [{interval_query}ms]' +
+        "&start={start_time}&end={end_time}",
+
+        'sum(count_over_time({{log_type="container", app_name=~"logmaker", app_instance=~".*", app_component=~".*", '
+        'namespace=~"personal-anmakarov", pod=~".*", container=~".*"}} | json | message=~"{search_string}" [{interval_query}ms]))' +
+        "&start={start_time}&end={end_time}",
+    ]
+    for loki_conf in glob.glob('conf_variants/*.yaml', recursive=True):
+        ok_status_counter = 0
+        err_status_counter = 0
+        v1_apps = client.AppsV1Api()
+
+        configmap_add_data("loki-loki-distributed", "system-logging-new", loki_conf)
+
+        restart_deployments(v1_apps, "loki-loki-distributed-query-scheduler", "system-logging-new")
+        restart_deployments(v1_apps, "loki-loki-distributed-querier", "system-logging-new")
+        restart_deployments(v1_apps, "loki-loki-distributed-query-frontend", "system-logging-new")
+
+        wait_for_deployment_complete(v1_apps, "loki-loki-distributed-query-scheduler", "system-logging-new")
+        wait_for_deployment_complete(v1_apps, "loki-loki-distributed-querier", "system-logging-new")
+        wait_for_deployment_complete(v1_apps, "loki-loki-distributed-query-frontend", "system-logging-new")
+
+        time.sleep(15)
+        for time_pair in times:
+            start_script_time = int(time.time())
+            start_time = time_pair[0]
+            end_time = time_pair[1]
+            interval_time = round((end_time-start_time)/1500, -2)
+            for search_string in search_strings:
+                for query in logs_queries:
+                    status_code = send_query_to_loki(endpoint, query.format(search_string=search_string, start_time = start_time, end_time=end_time))
+                    if status_code < 200 or status_code > 240:
+                        err_status_counter+=1
+                    else:
+                        ok_status_counter+=1
+                    time.sleep(1)
+
+                for query in count_queries:
+                    status_code = send_query_to_loki(endpoint, query.format(search_string=search_string, interval_query=interval_time ,start_time = start_time, end_time=end_time))
+                    if status_code < 200 or status_code > 240:
+                        err_status_counter+=1
+                    else:
+                        ok_status_counter+=1
+                    time.sleep(1)
+                time.sleep(15)
+        prepare_test_results(start_script_time, int(time.time()), {"name": loki_conf})
+        time.sleep(10)

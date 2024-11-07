@@ -1,0 +1,2 @@
+limits_config:
+  split_queries_by_interval: 1h
