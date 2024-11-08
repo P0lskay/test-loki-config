@@ -40,7 +40,7 @@ def wait_for_deployment_complete(v1_apps, deployment_name, ns, timeout=360):
                 s.observed_generation >= response.metadata.generation):
             return True
         else:
-            clogger.info(f'[updated_replicas:{s.updated_replicas},replicas:{s.replicas}'
+            clogger.debug(f'[updated_replicas:{s.updated_replicas},replicas:{s.replicas}'
                   ',available_replicas:{s.available_replicas},observed_generation:{s.observed_generation}] waiting...')
 
     raise RuntimeError(f'Waiting timeout for deployment {deployment_name}')
@@ -131,33 +131,34 @@ def prepare_test_results(start_time, end_time, stats):
 
     with open(filename, "a") as myfile:
         myfile.write(stats["name"] + '\n')
+        myfile.write(stats["ok"] + " " + stats["err"] + '\n')
         myfile.write(dashboard_link + '\n')
 if __name__ == "__main__" :
     clogger.info("Start script")
     endpoint = "http://10.236.204.2:3100/loki/api/v1/query_range"
     times = [
-        (1730974531, 1730983246)
+        #(1730977205, 1731020274), #12h
+        (1730984217, 1731005946), #6h
+        (1730987908, 1730998828), #3h
+        (1730991589, 1730995203), #1h
+        (1730992493, 1730994295), #30m
+        (1730992803, 1730993701), #15m
+        (1730993098, 1730993400), #5m
+        (1730993159, 1730993220), #1m
     ]
-    search_strings = [".*", "234781", "32478"]
+    search_strings = [".*", "234781"]
     logs_queries = [
         '{{log_type="container", app_name=~"logmaker", app_instance=~".*", app_component=~".*", '
-        'namespace=~"personal-anmakarov", pod=~".*", container=~".*"}} | "(?i){search_string}" | json | line_format "{{{{.message}}}}"' +
-        "&start={start_time}&end={end_time}&limit=1000",
-
-        '{{log_type="container", app_name=~"logmaker", app_instance=~".*", app_component=~".*", '
-        'namespace=~"personal-anmakarov", pod=~".*", container=~".*"}} | json | message=~"{search_string}" | line_format "{{{{.message}}}}"' +
-        "&start={start_time}&end={end_time}&limit=1000",
+        'namespace=~"personal-anmakarov", pod=~".*", container=~".*"}} | json | message=~"{search_string}" | line_format "{{{{.message}}}}"'
+        '&start={start_time}&end={end_time}&limit=1000',
     ]
     count_queries = [
         'sum(count_over_time({{log_type="container", app_name=~"logmaker", app_instance=~".*", app_component=~".*", '
-        'namespace=~"personal-anmakarov", pod=~".*", container=~".*"}} | "(?i){search_string}" [{interval_query}ms]' +
-        "&start={start_time}&end={end_time}",
-
-        'sum(count_over_time({{log_type="container", app_name=~"logmaker", app_instance=~".*", app_component=~".*", '
-        'namespace=~"personal-anmakarov", pod=~".*", container=~".*"}} | json | message=~"{search_string}" [{interval_query}ms]))' +
-        "&start={start_time}&end={end_time}",
+        'namespace=~"personal-anmakarov", pod=~".*", container=~".*"}} | json | message=~"{search_string}" [{interval_query}ms]))'
+        '&start={start_time}&end={end_time}',
     ]
     for loki_conf in glob.glob('conf_variants/*.yaml', recursive=True):
+        clogger.info(f'Работаем с конфигурацией: {loki_conf}')
         ok_status_counter = 0
         err_status_counter = 0
         v1_apps = client.AppsV1Api()
@@ -172,15 +173,17 @@ if __name__ == "__main__" :
         wait_for_deployment_complete(v1_apps, "loki-loki-distributed-querier", "system-logging-new")
         wait_for_deployment_complete(v1_apps, "loki-loki-distributed-query-frontend", "system-logging-new")
 
-        time.sleep(15)
+        time.sleep(10)
+        start_script_time = int(time.time())*1000
         for time_pair in times:
-            start_script_time = int(time.time())
             start_time = time_pair[0]
             end_time = time_pair[1]
-            interval_time = round((end_time-start_time)/1500, -2)
+            interval_time = max(int(round((end_time-start_time)/1500*1000, -2)), 50)
+            clogger.info(f'Выполняем запрос на интервале {start_time} - {end_time}, interval_time: {interval_time}')
             for search_string in search_strings:
                 for query in logs_queries:
                     status_code = send_query_to_loki(endpoint, query.format(search_string=search_string, start_time = start_time, end_time=end_time))
+                    clogger.info(f'Статус запроса логов: {status_code}')
                     if status_code < 200 or status_code > 240:
                         err_status_counter+=1
                     else:
@@ -189,11 +192,13 @@ if __name__ == "__main__" :
 
                 for query in count_queries:
                     status_code = send_query_to_loki(endpoint, query.format(search_string=search_string, interval_query=interval_time ,start_time = start_time, end_time=end_time))
+                    clogger.info(f'Статус запроса кол-ва логов: {status_code}')
                     if status_code < 200 or status_code > 240:
                         err_status_counter+=1
                     else:
                         ok_status_counter+=1
                     time.sleep(1)
-                time.sleep(15)
-        prepare_test_results(start_script_time, int(time.time()), {"name": loki_conf})
+                time.sleep(5)
+        time.sleep(20)
+        prepare_test_results(start_script_time, int(time.time())*1000, {"name": loki_conf, "ok": str(ok_status_counter), "err": str(err_status_counter)})
         time.sleep(10)
