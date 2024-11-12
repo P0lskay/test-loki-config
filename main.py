@@ -28,7 +28,6 @@ clogger.setLevel(logging.INFO)
 config.load_kube_config()
 
 def wait_for_deployment_complete(v1_apps, deployment_name, ns, timeout=360):
-    clogger.info(f'Update deployment:{deployment_name}')
     start = time.time()
     while time.time() - start < timeout:
         time.sleep(2)
@@ -38,6 +37,7 @@ def wait_for_deployment_complete(v1_apps, deployment_name, ns, timeout=360):
                 s.replicas == response.spec.replicas and
                 s.available_replicas == response.spec.replicas and
                 s.observed_generation >= response.metadata.generation):
+            clogger.info(f'Deployment:{deployment_name} is ready')
             return True
         else:
             clogger.debug(f'[updated_replicas:{s.updated_replicas},replicas:{s.replicas}'
@@ -89,6 +89,7 @@ def restart_deployments(v1_apps, deployment, ns):
     }
     try:
         v1_apps.patch_namespaced_deployment(deployment, ns, body, pretty='true')
+        clogger.info(f'Update deployment:{deployment}')
     except ApiException as e:
         print("Exception when calling AppsV1Api->read_namespaced_deployment_status: %s\n" % e)
 
@@ -103,11 +104,14 @@ def send_query_to_loki(endpoint, loki_query):
     #              'namespace=~"personal-anmakarov", pod=~".*", container=~".*"} |> "<_>' + str(search_int) + '<_>" '
     #              '| json | line_format "{{.message}}"' + "&start=" + str(int(start_time)) + "&end=" +
     #                str(int(end_time)) + "&limit=1000")
-    result_query = endpoint + "?query=" + loki_query
-    r = requests.get(result_query, headers={"X-Scope-OrgID": "personal-anmakarov|system-logging-new"}, timeout=120)
+    try:
+        result_query = endpoint + "?query=" + loki_query
+        r = requests.get(result_query, headers={"X-Scope-OrgID": "personal-anmakarov|system-logging-new"}, timeout=121)
 
-    return r.status_code
-
+        return r.status_code
+    except Exception as e:
+        clogger.error("Exception when sending query to Loki: %s\n" % e)
+        return 500
 
 def prepare_test_results(start_time, end_time, stats):
     """Prepare results of test
@@ -117,6 +121,7 @@ def prepare_test_results(start_time, end_time, stats):
         start_time (int):
         stats (dict):
     """
+    clogger.info("Prepare results for ")
     filename = "./results.txt"
     if not os.path.exists(os.path.dirname(filename)):
         try:
@@ -133,18 +138,17 @@ def prepare_test_results(start_time, end_time, stats):
         myfile.write(stats["name"] + '\n')
         myfile.write(stats["ok"] + " " + stats["err"] + '\n')
         myfile.write(dashboard_link + '\n')
+
 if __name__ == "__main__" :
     clogger.info("Start script")
     endpoint = "http://10.236.204.2:3100/loki/api/v1/query_range"
     times = [
-        #(1730977205, 1731020274), #12h
-        (1730984217, 1731005946), #6h
-        (1730987908, 1730998828), #3h
-        (1730991589, 1730995203), #1h
-        (1730992493, 1730994295), #30m
-        (1730992803, 1730993701), #15m
-        (1730993098, 1730993400), #5m
-        (1730993159, 1730993220), #1m
+        (1731297600, 1731384000), #24h
+        (1731315600, 1731358800), #12h
+        (1731358800, 1731380400), #6h
+        (1731304800, 1731315600), #3h
+        (1731315600, 1731319200), #1h
+        (1731319200, 1731319260), #1m
     ]
     search_strings = [".*", "234781"]
     logs_queries = [
@@ -179,11 +183,11 @@ if __name__ == "__main__" :
             start_time = time_pair[0]
             end_time = time_pair[1]
             interval_time = max(int(round((end_time-start_time)/1500*1000, -2)), 50)
-            clogger.info(f'Выполняем запрос на интервале {start_time} - {end_time}, interval_time: {interval_time}')
+            clogger.info(f'Query of logs for an interval {start_time} - {end_time}, interval_time: {interval_time}')
             for search_string in search_strings:
                 for query in logs_queries:
                     status_code = send_query_to_loki(endpoint, query.format(search_string=search_string, start_time = start_time, end_time=end_time))
-                    clogger.info(f'Статус запроса логов: {status_code}')
+                    clogger.info(f'Response status code logs: {status_code}')
                     if status_code < 200 or status_code > 240:
                         err_status_counter+=1
                     else:
@@ -192,7 +196,7 @@ if __name__ == "__main__" :
 
                 for query in count_queries:
                     status_code = send_query_to_loki(endpoint, query.format(search_string=search_string, interval_query=interval_time ,start_time = start_time, end_time=end_time))
-                    clogger.info(f'Статус запроса кол-ва логов: {status_code}')
+                    clogger.info(f'Response status code count of logs: {status_code}')
                     if status_code < 200 or status_code > 240:
                         err_status_counter+=1
                     else:

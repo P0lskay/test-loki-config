@@ -1,2 +1,8 @@
 limits_config:
-  split_queries_by_interval: 6h
+  max_query_parallelism: 32
+  tsdb_max_query_parallelism: 32
+  split_queries_by_interval: 15m
+  per_stream_rate_limit: 15MB
+  query_timeout: 2m
+querier:
+  max_concurrent: 4
